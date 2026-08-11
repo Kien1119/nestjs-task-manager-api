@@ -5,4 +5,6 @@ export interface Task {
   is_completed: boolean;
   created_at: Date;
   user_id: number | null;
+  priority: 'low' | 'medium' | 'high';
+  due_date?: string | null;
 }

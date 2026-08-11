@@ -1,4 +1,9 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Pool } from 'pg';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { Task } from './entities/task.entity';
@@ -41,6 +46,7 @@ export class TasksService {
 
     return res.rows;
   }
+
   async findOne(id: number, userId: number): Promise<Task> {
     const res = await this.pool.query<Task>(
       'SELECT * FROM tasks WHERE id = $1 AND user_id = $2',
@@ -58,10 +64,17 @@ export class TasksService {
     updateTaskDto: UpdateTaskDto,
     userId: number,
   ): Promise<Task> {
-    const { title, description, is_completed } = updateTaskDto;
+    const { title, description, is_completed, priority, due_date } =
+      updateTaskDto;
+    if (
+      updateTaskDto.due_date &&
+      new Date(updateTaskDto.due_date) < new Date()
+    ) {
+      throw new BadRequestException('Due date cannot be in the past');
+    }
     const res = await this.pool.query<Task>(
-      'UPDATE tasks SET title = COALESCE($1, title), description = COALESCE($2, description), is_completed = COALESCE($3, is_completed) WHERE id = $4 AND user_id = $5 RETURNING *',
-      [title, description, is_completed, id, userId],
+      'UPDATE tasks SET title = COALESCE($1, title), description = COALESCE($2, description), is_completed = COALESCE($3, is_completed), priority=COALESCE($4,priority), due_date=COALESCE($5,due_date) WHERE id = $6 AND user_id = $7 RETURNING *',
+      [title, description, is_completed, priority, due_date, id, userId],
     );
     const task = res.rows[0];
     if (!task) {
@@ -85,10 +98,16 @@ export class TasksService {
   }
 
   async create(createTaskDto: CreateTaskDto, userId: number): Promise<Task> {
-    const { title, description } = createTaskDto;
+    const { title, description, priority, due_date } = createTaskDto;
+    if (
+      createTaskDto.due_date &&
+      new Date(createTaskDto.due_date) < new Date()
+    ) {
+      throw new BadRequestException('Due date cannot be in the past');
+    }
     const result = await this.pool.query<Task>(
-      'INSERT INTO tasks (title, description,user_id) VALUES ($1, $2, $3) RETURNING *',
-      [title, description, userId],
+      'INSERT INTO tasks (title, description, user_id, priority, due_date) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, description, userId, priority ?? 'medium', due_date],
     );
     const task = result.rows[0];
     await this.redis.del(this.getCacheKey(userId));
