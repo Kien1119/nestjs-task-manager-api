@@ -24,23 +24,56 @@ export class TasksService {
     // thêm hàm này
     return `tasks:user:${userId}`;
   }
-  async findAll(userId: number): Promise<Task[]> {
-    const cacheKey = this.getCacheKey(userId);
+
+  private async invalidateCache(userId: number): Promise<void> {
+    const keys = await this.redis.keys(`${this.getCacheKey(userId)}*`);
+    if (keys.length) {
+      await this.redis.del(...keys);
+    }
+  }
+
+  async findAll(
+    userId: number,
+    is_completed?: string,
+    sortBy?: string,
+    order?: string,
+  ): Promise<Task[]> {
+    const cacheKey =
+      this.getCacheKey(userId) +
+      (is_completed !== undefined ? `:is_completed:${is_completed}` : '') +
+      (sortBy ? `:sortBy:${sortBy}` : '') +
+      (order ? `:order:${order}` : '');
     const cached = await this.redis.get(cacheKey);
 
     // 1. Kiểm tra cache trước
     if (cached) {
-      console.log('cache HIT');
       return JSON.parse(cached) as Task[];
     }
 
     // 2. Cache miss -> query DB
-    console.log('💾 Cache MISS - querying DB');
 
-    const res = await this.pool.query<Task>(
-      'SELECT * FROM tasks WHERE user_id = $1 ORDER BY created_at DESC',
-      [userId],
-    );
+    let query = 'SELECT * FROM tasks WHERE user_id = $1';
+    const params: (number | boolean)[] = [userId];
+
+    if (is_completed === 'true' || is_completed === 'false') {
+      params.push(is_completed === 'true');
+      query += ` AND is_completed = $${params.length}`;
+    }
+
+    const allowedSortFields = ['created_at', 'priority', 'due_date'];
+    const allowedOrders = ['asc', 'desc'];
+
+    if (
+      sortBy &&
+      order &&
+      allowedSortFields.includes(sortBy) &&
+      allowedOrders.includes(order)
+    ) {
+      query += ` ORDER BY ${sortBy} ${order.toUpperCase()}`;
+    } else {
+      query += ' ORDER BY created_at DESC';
+    }
+    const res = await this.pool.query<Task>(query, params);
 
     await this.redis.set(cacheKey, JSON.stringify(res.rows), 'EX', 30);
 
@@ -80,7 +113,7 @@ export class TasksService {
     if (!task) {
       throw new NotFoundException(`Task with id ${id} not found`);
     }
-    await this.redis.del(this.getCacheKey(userId));
+    await this.invalidateCache(userId);
     this.tasksGateWay.emitTaskUpdated(userId, task);
     return task;
   }
@@ -93,7 +126,7 @@ export class TasksService {
     if ((res.rowCount ?? 0) === 0) {
       throw new NotFoundException('Task not found');
     }
-    await this.redis.del(this.getCacheKey(userId));
+    await this.invalidateCache(userId);
     this.tasksGateWay.emitTaskDeleted(userId, id);
   }
 
@@ -110,7 +143,7 @@ export class TasksService {
       [title, description, userId, priority ?? 'medium', due_date],
     );
     const task = result.rows[0];
-    await this.redis.del(this.getCacheKey(userId));
+    await this.invalidateCache(userId);
     this.tasksGateWay.emitTaskCreated(userId, task);
 
     return task;

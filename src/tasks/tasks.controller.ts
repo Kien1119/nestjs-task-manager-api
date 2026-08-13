@@ -8,6 +8,7 @@ import {
   ParseIntPipe,
   Post,
   Put,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { TasksService } from './tasks.service';
@@ -26,8 +27,13 @@ export class TasksController {
 
   @ApiOperation({ summary: 'Get all tasks of the current user' })
   @Get()
-  findAll(@CurrentUser() user: { userId: number; email: string }) {
-    return this.tasksService.findAll(user.userId);
+  findAll(
+    @CurrentUser() user: { userId: number; email: string },
+    @Query('is_completed') is_completed?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('order') order?: string,
+  ) {
+    return this.tasksService.findAll(user.userId, is_completed, sortBy, order);
   }
 
   @ApiOperation({ summary: 'Get a task by id' })
