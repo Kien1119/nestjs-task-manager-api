@@ -9,6 +9,7 @@ import type { RequestUser } from '../auth/types/request-user.type';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
@@ -57,5 +58,12 @@ export class AuthController {
     {
       return this.authService.resetPassword(dto.token, dto.newPassword);
     }
+  }
+
+  @ApiOperation({ summary: 'Refresh access token' })
+  @Post('refresh-token')
+  @HttpCode(200)
+  async refreshToken(@Body() dto: RefreshTokenDto) {
+    return this.authService.refreshAccessToken(dto.refreshToken);
   }
 }

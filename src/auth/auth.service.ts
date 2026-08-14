@@ -43,16 +43,54 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    const token = await this.jwtService.signAsync({
-      userId: user.id,
-      email: user.email,
-      roles: user.roles || ['user'], // Thêm roles vào payload của JWT
-    });
+    const accessToken = await this.jwtService.signAsync(
+      {
+        userId: user.id,
+        email: user.email,
+        roles: user.roles || ['user'], // Thêm roles vào payload của JWT
+      },
+      {
+        expiresIn: '15m', // Thời gian sống của access token
+      },
+    );
+
+    const refreshToken = crypto.randomBytes(32).toString('hex'); // chuỗi hex 64 ký tự
+    await this.redis.set(
+      `refresh:token:${refreshToken}`,
+      user.id.toString(),
+      'EX',
+      7 * 24 * 60 * 60, // Thời gian sống của refresh token (7 ngày)
+    );
 
     return {
-      token,
+      accessToken,
+      refreshToken, // Trả về refresh token
       user: { id: user.id, email: user.email, roles: user.roles || ['user'] }, // Trả về roles cùng với thông tin user
     };
+  }
+
+  async refreshAccessToken(refreshToken: string) {
+    const userId = await this.redis.get(`refresh:token:${refreshToken}`);
+    if (!userId) {
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+
+    const user = await this.usersService.findById(Number(userId));
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+    const newAccessToken = await this.jwtService.signAsync(
+      {
+        userId: user.id,
+        email: user.email,
+        roles: user.roles || ['user'], // Thêm roles vào payload của JWT
+      },
+      {
+        expiresIn: '15m', // Thời gian sống của access token
+      },
+    );
+
+    return { accessToken: newAccessToken };
   }
 
   async changePassword(

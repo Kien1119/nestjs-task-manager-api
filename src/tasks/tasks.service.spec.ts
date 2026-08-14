@@ -13,11 +13,12 @@ describe('TasksService', () => {
     query: jest.fn(),
   };
 
-  // Mock cho Redis - cần get, set, del
+  // Mock cho Redis - cần get, set, del, keys (dùng bởi invalidateCache)
   const mockRedis = {
     get: jest.fn(),
     set: jest.fn(),
     del: jest.fn(),
+    keys: jest.fn().mockResolvedValue(['tasks:user:1']),
   };
 
   // Mock cho Gateway - cần 3 hàm emit

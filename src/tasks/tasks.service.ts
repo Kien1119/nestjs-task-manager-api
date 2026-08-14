@@ -20,6 +20,7 @@ export class TasksService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis, // thêm dòng này
     private readonly tasksGateWay: TasksGateway,
   ) {}
+
   private getCacheKey(userId: number): string {
     // thêm hàm này
     return `tasks:user:${userId}`;
