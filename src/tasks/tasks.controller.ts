@@ -42,7 +42,7 @@ export class TasksController {
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: { userId: number; email: string },
   ) {
-    return this.tasksService.findOne(id, user.userId);
+    return this.tasksService.findOneAccessible(id, user.userId);
   }
 
   @ApiOperation({ summary: 'Create a new task' })

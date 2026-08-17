@@ -20,13 +20,47 @@ export class TasksService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis, // thêm dòng này
     private readonly tasksGateWay: TasksGateway,
   ) {}
+  /** Xác thực quyền truy cập task, trả về id chủ sở hữu nếu hợp lệ. */
+  private async checkAccess(
+    taskId: number,
+    userId: number,
+    requireEdit: boolean,
+  ): Promise<number> {
+    const res = await this.pool.query<{
+      user_id: number | null;
+      permission: 'view' | 'edit' | null;
+    }>(
+      `SELECT t.user_id, ts.permission
+     FROM tasks t
+     LEFT JOIN task_shares ts ON ts.task_id = t.id AND ts.shared_with_user_id = $2
+     WHERE t.id = $1`,
+      [taskId, userId],
+    );
 
+    const row = res.rows[0];
+    if (!row) {
+      throw new NotFoundException('Task not found');
+    }
+
+    const isOwner = row.user_id === userId;
+    const hasEditPermission = row.permission === 'edit';
+
+    if (!isOwner && row.permission === null) {
+      throw new NotFoundException('Task not found'); // không share, không sở hữu
+    }
+
+    if (!isOwner && !hasEditPermission && requireEdit) {
+      throw new NotFoundException('Task not found'); // vẫn 404, không lộ thông tin
+    }
+
+    return row.user_id as number;
+  }
   private getCacheKey(userId: number): string {
     // thêm hàm này
     return `tasks:user:${userId}`;
   }
 
-  private async invalidateCache(userId: number): Promise<void> {
+  async invalidateCache(userId: number): Promise<void> {
     const keys = await this.redis.keys(`${this.getCacheKey(userId)}*`);
     if (keys.length) {
       await this.redis.del(...keys);
@@ -53,7 +87,9 @@ export class TasksService {
 
     // 2. Cache miss -> query DB
 
-    let query = 'SELECT * FROM tasks WHERE user_id = $1';
+    let query = `SELECT t.* FROM tasks t WHERE (t.user_id = $1 OR EXISTS (
+      SELECT 1 FROM task_shares ts WHERE ts.task_id = t.id AND ts.shared_with_user_id = $1
+    ))`;
     const params: (number | boolean)[] = [userId];
 
     if (is_completed === 'true' || is_completed === 'false') {
@@ -81,6 +117,7 @@ export class TasksService {
     return res.rows;
   }
 
+  /** Owner-only lookup — dùng để các module khác (labels, comments, shares) kiểm tra quyền sở hữu. */
   async findOne(id: number, userId: number): Promise<Task> {
     const res = await this.pool.query<Task>(
       'SELECT * FROM tasks WHERE id = $1 AND user_id = $2',
@@ -91,6 +128,16 @@ export class TasksService {
       throw new NotFoundException(`Task with id ${id} not found`);
     }
     return task;
+  }
+
+  /** Owner hoặc user được share (view/edit) đều xem được. */
+  async findOneAccessible(id: number, userId: number): Promise<Task> {
+    await this.checkAccess(id, userId, false);
+    const res = await this.pool.query<Task>(
+      'SELECT * FROM tasks WHERE id = $1',
+      [id],
+    );
+    return res.rows[0];
   }
 
   async update(
@@ -106,29 +153,24 @@ export class TasksService {
     ) {
       throw new BadRequestException('Due date cannot be in the past');
     }
+    // chỉ owner hoặc user có permission = 'edit' mới được sửa
+    const ownerId = await this.checkAccess(id, userId, true);
     const res = await this.pool.query<Task>(
-      'UPDATE tasks SET title = COALESCE($1, title), description = COALESCE($2, description), is_completed = COALESCE($3, is_completed), priority=COALESCE($4,priority), due_date=COALESCE($5,due_date) WHERE id = $6 AND user_id = $7 RETURNING *',
-      [title, description, is_completed, priority, due_date, id, userId],
+      'UPDATE tasks SET title = COALESCE($1, title), description = COALESCE($2, description), is_completed = COALESCE($3, is_completed), priority=COALESCE($4,priority), due_date=COALESCE($5,due_date) WHERE id = $6 RETURNING *',
+      [title, description, is_completed, priority, due_date, id],
     );
     const task = res.rows[0];
-    if (!task) {
-      throw new NotFoundException(`Task with id ${id} not found`);
-    }
-    await this.invalidateCache(userId);
-    this.tasksGateWay.emitTaskUpdated(userId, task);
+    await this.invalidateCache(ownerId);
+    this.tasksGateWay.emitTaskUpdated(ownerId, task);
     return task;
   }
 
   async remove(id: number, userId: number): Promise<void> {
-    const res = await this.pool.query(
-      'DELETE FROM tasks WHERE id = $1 AND user_id = $2 RETURNING id',
-      [id, userId],
-    );
-    if ((res.rowCount ?? 0) === 0) {
-      throw new NotFoundException('Task not found');
-    }
-    await this.invalidateCache(userId);
-    this.tasksGateWay.emitTaskDeleted(userId, id);
+    // chỉ owner hoặc user có permission = 'edit' mới được xóa
+    const ownerId = await this.checkAccess(id, userId, true);
+    await this.pool.query('DELETE FROM tasks WHERE id = $1', [id]);
+    await this.invalidateCache(ownerId);
+    this.tasksGateWay.emitTaskDeleted(ownerId, id);
   }
 
   async create(createTaskDto: CreateTaskDto, userId: number): Promise<Task> {

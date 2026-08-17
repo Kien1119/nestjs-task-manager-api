@@ -118,9 +118,21 @@ describe('TasksService', () => {
       );
     });
 
-    it('update task, xoá cache và emit event', async () => {
+    it('throw NotFoundException khi user chỉ có quyền view (không được sửa)', async () => {
+      mockPool.query.mockResolvedValueOnce({
+        rows: [{ user_id: 2, permission: 'view' }],
+      });
+
+      await expect(service.update(1, { title: 'updated' }, 1)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('update task khi là owner, xoá cache và emit event', async () => {
       const task = { id: 1, title: 'updated' };
-      mockPool.query.mockResolvedValue({ rows: [task] });
+      mockPool.query
+        .mockResolvedValueOnce({ rows: [{ user_id: 1, permission: null }] }) // checkAccess: owner
+        .mockResolvedValueOnce({ rows: [task] }); // UPDATE ... RETURNING *
 
       const result = await service.update(1, { title: 'updated' }, 1);
 
@@ -128,17 +140,41 @@ describe('TasksService', () => {
       expect(mockRedis.del).toHaveBeenCalledWith('tasks:user:1');
       expect(mockGateway.emitTaskUpdated).toHaveBeenCalledWith(1, task);
     });
+
+    it('update task khi user được share permission = edit', async () => {
+      const task = { id: 1, title: 'updated' };
+      mockPool.query
+        .mockResolvedValueOnce({ rows: [{ user_id: 2, permission: 'edit' }] }) // checkAccess: shared editor
+        .mockResolvedValueOnce({ rows: [task] });
+
+      const result = await service.update(1, { title: 'updated' }, 1);
+
+      expect(result).toEqual(task);
+      // cache/socket phải nhắm vào chủ task (userId 2), không phải người đang sửa (userId 1)
+      expect(mockRedis.keys).toHaveBeenCalledWith('tasks:user:2*');
+      expect(mockGateway.emitTaskUpdated).toHaveBeenCalledWith(2, task);
+    });
   });
 
   describe('remove', () => {
-    it('throw NotFoundException khi không có row nào bị xoá', async () => {
-      mockPool.query.mockResolvedValue({ rowCount: 0 });
+    it('throw NotFoundException khi task không tồn tại', async () => {
+      mockPool.query.mockResolvedValue({ rows: [] });
 
       await expect(service.remove(1, 1)).rejects.toThrow(NotFoundException);
     });
 
-    it('xoá cache và emit event khi xoá thành công', async () => {
-      mockPool.query.mockResolvedValue({ rowCount: 1 });
+    it('throw NotFoundException khi user chỉ có quyền view (không được xoá)', async () => {
+      mockPool.query.mockResolvedValueOnce({
+        rows: [{ user_id: 2, permission: 'view' }],
+      });
+
+      await expect(service.remove(1, 1)).rejects.toThrow(NotFoundException);
+    });
+
+    it('xoá cache và emit event khi xoá thành công (owner)', async () => {
+      mockPool.query
+        .mockResolvedValueOnce({ rows: [{ user_id: 1, permission: null }] }) // checkAccess: owner
+        .mockResolvedValueOnce({ rowCount: 1 }); // DELETE
 
       await service.remove(1, 1);
 
