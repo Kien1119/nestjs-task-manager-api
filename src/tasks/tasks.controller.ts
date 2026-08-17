@@ -6,6 +6,7 @@ import {
   HttpCode,
   Param,
   ParseIntPipe,
+  Patch,
   Post,
   Put,
   Query,
@@ -72,5 +73,14 @@ export class TasksController {
     @CurrentUser() user: { userId: number; email: string },
   ) {
     return this.tasksService.remove(id, user.userId);
+  }
+
+  @ApiOperation({ summary: 'Restore a soft-deleted task' })
+  @Patch(':id/restore')
+  restore(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: { userId: number; email: string },
+  ) {
+    return this.tasksService.restore(id, user.userId);
   }
 }

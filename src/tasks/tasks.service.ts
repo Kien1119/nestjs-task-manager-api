@@ -33,7 +33,7 @@ export class TasksService {
       `SELECT t.user_id, ts.permission
      FROM tasks t
      LEFT JOIN task_shares ts ON ts.task_id = t.id AND ts.shared_with_user_id = $2
-     WHERE t.id = $1`,
+     WHERE t.id = $1 AND t.deleted_at IS NULL`,
       [taskId, userId],
     );
 
@@ -86,10 +86,9 @@ export class TasksService {
     }
 
     // 2. Cache miss -> query DB
-
     let query = `SELECT t.* FROM tasks t WHERE (t.user_id = $1 OR EXISTS (
       SELECT 1 FROM task_shares ts WHERE ts.task_id = t.id AND ts.shared_with_user_id = $1
-    ))`;
+    )) AND t.deleted_at IS NULL`;
     const params: (number | boolean)[] = [userId];
 
     if (is_completed === 'true' || is_completed === 'false') {
@@ -120,7 +119,7 @@ export class TasksService {
   /** Owner-only lookup — dùng để các module khác (labels, comments, shares) kiểm tra quyền sở hữu. */
   async findOne(id: number, userId: number): Promise<Task> {
     const res = await this.pool.query<Task>(
-      'SELECT * FROM tasks WHERE id = $1 AND user_id = $2',
+      'SELECT * FROM tasks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
       [id, userId],
     );
     const task = res.rows[0];
@@ -134,7 +133,7 @@ export class TasksService {
   async findOneAccessible(id: number, userId: number): Promise<Task> {
     await this.checkAccess(id, userId, false);
     const res = await this.pool.query<Task>(
-      'SELECT * FROM tasks WHERE id = $1',
+      'SELECT * FROM tasks WHERE id = $1 AND deleted_at IS NULL',
       [id],
     );
     return res.rows[0];
@@ -168,7 +167,9 @@ export class TasksService {
   async remove(id: number, userId: number): Promise<void> {
     // chỉ owner hoặc user có permission = 'edit' mới được xóa
     const ownerId = await this.checkAccess(id, userId, true);
-    await this.pool.query('DELETE FROM tasks WHERE id = $1', [id]);
+    await this.pool.query('UPDATE tasks SET deleted_at = now() WHERE id = $1', [
+      id,
+    ]);
     await this.invalidateCache(ownerId);
     this.tasksGateWay.emitTaskDeleted(ownerId, id);
   }
@@ -189,6 +190,20 @@ export class TasksService {
     await this.invalidateCache(userId);
     this.tasksGateWay.emitTaskCreated(userId, task);
 
+    return task;
+  }
+  async restore(id: number, userId: number): Promise<Task> {
+    // Chỉ owner mới khôi phục được (không cho share user restore)
+    const res = await this.pool.query<Task>(
+      'UPDATE tasks SET deleted_at = NULL WHERE id = $1 AND user_id = $2 AND deleted_at IS NOT NULL RETURNING *',
+      [id, userId],
+    );
+    const task = res.rows[0];
+    if (!task) {
+      throw new NotFoundException('Task not found or not deleted');
+    }
+    await this.invalidateCache(userId);
+    this.tasksGateWay.emitTaskRestored(userId, task);
     return task;
   }
 }

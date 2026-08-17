@@ -38,4 +38,8 @@ export class TasksGateway implements OnGatewayConnection, OnGatewayDisconnect {
   emitTaskDeleted(userId: number, taskId: number) {
     this.server.emit(`task:deleted:${userId}`, taskId);
   }
+
+  emitTaskRestored(userId: number, task: unknown) {
+    this.server.emit(`task:restored:${userId}`, task);
+  }
 }

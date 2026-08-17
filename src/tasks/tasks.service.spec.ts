@@ -26,6 +26,7 @@ describe('TasksService', () => {
     emitTaskCreated: jest.fn(),
     emitTaskUpdated: jest.fn(),
     emitTaskDeleted: jest.fn(),
+    emitTaskRestored: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -180,6 +181,25 @@ describe('TasksService', () => {
 
       expect(mockRedis.del).toHaveBeenCalledWith('tasks:user:1');
       expect(mockGateway.emitTaskDeleted).toHaveBeenCalledWith(1, 1);
+    });
+  });
+
+  describe('restore', () => {
+    it('throw NotFoundException khi task không tồn tại/không bị xoá/không phải owner', async () => {
+      mockPool.query.mockResolvedValue({ rows: [] });
+
+      await expect(service.restore(1, 1)).rejects.toThrow(NotFoundException);
+    });
+
+    it('khôi phục task, xoá cache và emit event', async () => {
+      const task = { id: 1, title: 'restored', deleted_at: null };
+      mockPool.query.mockResolvedValue({ rows: [task] });
+
+      const result = await service.restore(1, 1);
+
+      expect(result).toEqual(task);
+      expect(mockRedis.del).toHaveBeenCalledWith('tasks:user:1');
+      expect(mockGateway.emitTaskRestored).toHaveBeenCalledWith(1, task);
     });
   });
 });
