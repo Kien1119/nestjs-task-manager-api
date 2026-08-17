@@ -4,40 +4,30 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Pool } from 'pg';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { Task } from './entities/task.entity';
-import { DATABASE_POOL } from '../database/database.provider';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from '../database/redis.provider';
 import { TasksGateway } from './tasks.gateway';
+import { TasksRepository } from './tasks.repository';
 
 @Injectable()
 export class TasksService {
   constructor(
-    @Inject(DATABASE_POOL) private readonly pool: Pool,
+    private readonly tasksRepository: TasksRepository,
     @Inject(REDIS_CLIENT) private readonly redis: Redis, // thêm dòng này
     private readonly tasksGateWay: TasksGateway,
   ) {}
+
   /** Xác thực quyền truy cập task, trả về id chủ sở hữu nếu hợp lệ. */
   private async checkAccess(
     taskId: number,
     userId: number,
     requireEdit: boolean,
   ): Promise<number> {
-    const res = await this.pool.query<{
-      user_id: number | null;
-      permission: 'view' | 'edit' | null;
-    }>(
-      `SELECT t.user_id, ts.permission
-     FROM tasks t
-     LEFT JOIN task_shares ts ON ts.task_id = t.id AND ts.shared_with_user_id = $2
-     WHERE t.id = $1 AND t.deleted_at IS NULL`,
-      [taskId, userId],
-    );
+    const row = await this.tasksRepository.checkAccess(taskId, userId);
 
-    const row = res.rows[0];
     if (!row) {
       throw new NotFoundException('Task not found');
     }
@@ -55,6 +45,7 @@ export class TasksService {
 
     return row.user_id as number;
   }
+
   private getCacheKey(userId: number): string {
     // thêm hàm này
     return `tasks:user:${userId}`;
@@ -86,44 +77,22 @@ export class TasksService {
     }
 
     // 2. Cache miss -> query DB
-    let query = `SELECT t.* FROM tasks t WHERE (t.user_id = $1 OR EXISTS (
-      SELECT 1 FROM task_shares ts WHERE ts.task_id = t.id AND ts.shared_with_user_id = $1
-    )) AND t.deleted_at IS NULL`;
-    const params: (number | boolean)[] = [userId];
+    const tasks = await this.tasksRepository.findAllByUserId(
+      userId,
+      is_completed,
+      sortBy,
+      order,
+    );
 
-    if (is_completed === 'true' || is_completed === 'false') {
-      params.push(is_completed === 'true');
-      query += ` AND is_completed = $${params.length}`;
-    }
+    await this.redis.set(cacheKey, JSON.stringify(tasks), 'EX', 30);
 
-    const allowedSortFields = ['created_at', 'priority', 'due_date'];
-    const allowedOrders = ['asc', 'desc'];
-
-    if (
-      sortBy &&
-      order &&
-      allowedSortFields.includes(sortBy) &&
-      allowedOrders.includes(order)
-    ) {
-      query += ` ORDER BY ${sortBy} ${order.toUpperCase()}`;
-    } else {
-      query += ' ORDER BY created_at DESC';
-    }
-    const res = await this.pool.query<Task>(query, params);
-
-    await this.redis.set(cacheKey, JSON.stringify(res.rows), 'EX', 30);
-
-    return res.rows;
+    return tasks;
   }
 
   /** Owner-only lookup — dùng để các module khác (labels, comments, shares) kiểm tra quyền sở hữu. */
   async findOne(id: number, userId: number): Promise<Task> {
-    const res = await this.pool.query<Task>(
-      'SELECT * FROM tasks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
-      [id, userId],
-    );
-    const task = res.rows[0];
-    if (!task) {
+    const task = await this.tasksRepository.findOneById(id);
+    if (!task || task.user_id !== userId) {
       throw new NotFoundException(`Task with id ${id} not found`);
     }
     return task;
@@ -132,11 +101,8 @@ export class TasksService {
   /** Owner hoặc user được share (view/edit) đều xem được. */
   async findOneAccessible(id: number, userId: number): Promise<Task> {
     await this.checkAccess(id, userId, false);
-    const res = await this.pool.query<Task>(
-      'SELECT * FROM tasks WHERE id = $1 AND deleted_at IS NULL',
-      [id],
-    );
-    return res.rows[0];
+    // checkAccess đã xác nhận task tồn tại nên record chắc chắn có
+    return (await this.tasksRepository.findOneById(id)) as Task;
   }
 
   async update(
@@ -144,8 +110,6 @@ export class TasksService {
     updateTaskDto: UpdateTaskDto,
     userId: number,
   ): Promise<Task> {
-    const { title, description, is_completed, priority, due_date } =
-      updateTaskDto;
     if (
       updateTaskDto.due_date &&
       new Date(updateTaskDto.due_date) < new Date()
@@ -154,11 +118,10 @@ export class TasksService {
     }
     // chỉ owner hoặc user có permission = 'edit' mới được sửa
     const ownerId = await this.checkAccess(id, userId, true);
-    const res = await this.pool.query<Task>(
-      'UPDATE tasks SET title = COALESCE($1, title), description = COALESCE($2, description), is_completed = COALESCE($3, is_completed), priority=COALESCE($4,priority), due_date=COALESCE($5,due_date) WHERE id = $6 RETURNING *',
-      [title, description, is_completed, priority, due_date, id],
-    );
-    const task = res.rows[0];
+    const task = (await this.tasksRepository.updateById(
+      id,
+      updateTaskDto,
+    )) as Task;
     await this.invalidateCache(ownerId);
     this.tasksGateWay.emitTaskUpdated(ownerId, task);
     return task;
@@ -167,38 +130,28 @@ export class TasksService {
   async remove(id: number, userId: number): Promise<void> {
     // chỉ owner hoặc user có permission = 'edit' mới được xóa
     const ownerId = await this.checkAccess(id, userId, true);
-    await this.pool.query('UPDATE tasks SET deleted_at = now() WHERE id = $1', [
-      id,
-    ]);
+    await this.tasksRepository.softDeleteById(id);
     await this.invalidateCache(ownerId);
     this.tasksGateWay.emitTaskDeleted(ownerId, id);
   }
 
   async create(createTaskDto: CreateTaskDto, userId: number): Promise<Task> {
-    const { title, description, priority, due_date } = createTaskDto;
     if (
       createTaskDto.due_date &&
       new Date(createTaskDto.due_date) < new Date()
     ) {
       throw new BadRequestException('Due date cannot be in the past');
     }
-    const result = await this.pool.query<Task>(
-      'INSERT INTO tasks (title, description, user_id, priority, due_date) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [title, description, userId, priority ?? 'medium', due_date],
-    );
-    const task = result.rows[0];
+    const task = await this.tasksRepository.insert(createTaskDto, userId);
     await this.invalidateCache(userId);
     this.tasksGateWay.emitTaskCreated(userId, task);
 
     return task;
   }
+
   async restore(id: number, userId: number): Promise<Task> {
     // Chỉ owner mới khôi phục được (không cho share user restore)
-    const res = await this.pool.query<Task>(
-      'UPDATE tasks SET deleted_at = NULL WHERE id = $1 AND user_id = $2 AND deleted_at IS NOT NULL RETURNING *',
-      [id, userId],
-    );
-    const task = res.rows[0];
+    const task = await this.tasksRepository.restoreById(id, userId);
     if (!task) {
       throw new NotFoundException('Task not found or not deleted');
     }
